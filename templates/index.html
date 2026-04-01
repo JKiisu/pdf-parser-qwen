@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PDF Target Extractor</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="panel">
+        <p class="eyebrow">Local document parser</p>
+        <p class="meta">build={{ build_id }}</p>
+        <h1>Extract a target section from a PDF</h1>
+        <p class="lede">
+          Upload a PDF, choose the extraction task, and let the app route local text into
+          <code>llama-server</code>. Patent parsing now scans every page, ranks likely claim pages,
+          and then extracts from a focused window.
+        </p>
+
+        <form class="upload-form" action="/parse" method="post" enctype="multipart/form-data">
+          <label class="field">
+            <span>Task</span>
+            <select name="task">
+              {% for task_id, task in tasks.items() %}
+                <option value="{{ task_id }}" {% if selected_task == task_id %}selected{% endif %}>
+                  {{ task.label }}
+                </option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="file-picker">
+            <span>Select PDF</span>
+            <input type="file" name="pdf" accept="application/pdf,.pdf" required>
+          </label>
+          <label class="prompt-box">
+            <span>Prompt Override</span>
+            <textarea
+              name="custom_prompt"
+              rows="7"
+              placeholder="Optional. Paste a custom system prompt here."
+            >{{ custom_prompt }}</textarea>
+          </label>
+          <button type="submit">Run Extraction</button>
+        </form>
+
+        {% if error %}
+          <div class="card error">
+            <h2>Error</h2>
+            <p>{{ error }}</p>
+            {% if details %}
+              <pre>{{ details }}</pre>
+            {% endif %}
+          </div>
+        {% endif %}
+
+        {% if result %}
+          <div class="card result">
+            <p class="meta">{{ filename }} · {{ chars_examined }} chars examined</p>
+            <h2>{{ result_label }}</h2>
+            {% if result_meta %}
+              <p class="meta">
+                mode={{ result_meta.mode }}
+                · candidate pages={{ result_meta.candidate_pages|join(', ') }}
+                · used pages={{ result_meta.used_pages|join(', ') }}
+              </p>
+            {% endif %}
+            <pre>{{ result }}</pre>
+          </div>
+        {% endif %}
+      </section>
+    </main>
+  </body>
+</html>
