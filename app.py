@@ -4,7 +4,7 @@ from typing import Any, Optional
 
 import fitz
 import requests
-from flask import Flask, redirect, render_template, request, url_for
+from flask import Flask, jsonify, redirect, render_template, request, url_for
 
 
 LLAMA_BASE_URL = os.getenv("LLAMA_BASE_URL", "http://127.0.0.1:8080")
@@ -23,7 +23,7 @@ PATENT_MIN_RESULT_CHARS = int(os.getenv("PATENT_MIN_RESULT_CHARS", "160"))
 PATENT_ALLOW_FULL_DOC_FALLBACK = os.getenv("PATENT_ALLOW_FULL_DOC_FALLBACK", "1") == "1"
 PATENT_FULL_DOC_MAX_CHARS = int(os.getenv("PATENT_FULL_DOC_MAX_CHARS", "120000"))
 PATENT_MAX_CANDIDATES = int(os.getenv("PATENT_MAX_CANDIDATES", "6"))
-BUILD_ID = "claims-anchor-v6"
+BUILD_ID = "claims-anchor-v6r-backend1"
 
 TASK_PROFILES = {
     "abstract": {
@@ -129,8 +129,64 @@ def extract_with_llama(paper_text: str, system_prompt: str, max_tokens: int) -> 
     response.raise_for_status()
 
     data = response.json()
-    abstract = data["choices"][0]["message"]["content"].strip()
-    return abstract.strip("`").strip()
+    choices = data.get("choices") or []
+    if not choices:
+        raise ValueError("Model response did not include any choices.")
+
+    choice = choices[0]
+    message = choice.get("message") or {}
+    content = message.get("content", "")
+
+    if isinstance(content, list):
+        text_parts = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text_parts.append(item.get("text", ""))
+        content = "\n".join(part for part in text_parts if part)
+
+    if not content and isinstance(choice.get("text"), str):
+        content = choice["text"]
+
+    result = content.strip().strip("`").strip()
+    if not result:
+        finish_reason = choice.get("finish_reason", "unknown")
+        raise ValueError(f"Model returned an empty response. finish_reason={finish_reason}")
+
+    return result
+
+
+def parse_uploaded_pdf(
+    uploaded_file: Any, selected_task: str, custom_prompt: str
+) -> dict[str, Any]:
+    if uploaded_file is None or uploaded_file.filename == "":
+        raise ValueError("Choose a PDF file first.")
+
+    task = get_task_config(selected_task, custom_prompt)
+    pdf_bytes = uploaded_file.read()
+    if task["pipeline"] == "patent_claim":
+        page_texts = extract_pdf_pages(pdf_bytes, two_column=True)
+        result, result_meta = extract_patent_claim(page_texts, task)
+        chars_examined = sum(len(page_texts[page - 1]) for page in result_meta["used_pages"])
+    else:
+        page_texts = extract_pdf_pages(pdf_bytes)
+        paper_text = extract_front_text(page_texts, task["max_pages"], task["max_chars"])
+        result = extract_with_llama(paper_text, task["prompt"], task["max_tokens"])
+        result_meta = {
+            "candidate_pages": list(range(1, min(task["max_pages"], len(page_texts)) + 1)),
+            "used_pages": list(range(1, min(task["max_pages"], len(page_texts)) + 1)),
+            "mode": "front_text",
+            "attempts": [],
+        }
+        chars_examined = len(paper_text)
+
+    return {
+        "task_id": selected_task,
+        "task_label": task["label"],
+        "filename": uploaded_file.filename,
+        "result": result,
+        "result_meta": result_meta,
+        "chars_examined": chars_examined,
+    }
 
 
 def summarize_page(page_text: str) -> str:
@@ -243,6 +299,10 @@ def clean_patent_claim_text(text: str) -> str:
                 lines.append("")
             continue
         if stripped in {"B2", "B1", "A1", "A2"}:
+            continue
+        if re.fullmatch(r"\d{1,3}", stripped):
+            continue
+        if re.fullmatch(r"PF\s+[A-Z0-9 ]+", stripped):
             continue
         lines.append(line.rstrip())
 
@@ -418,6 +478,32 @@ def parse_redirect() -> Any:
     return redirect(url_for("index"))
 
 
+@app.post("/api/parse")
+def parse_pdf_api() -> Any:
+    uploaded_file = request.files.get("pdf")
+    selected_task = request.form.get("task", "abstract")
+    custom_prompt = request.form.get("custom_prompt", "")
+
+    try:
+        payload = parse_uploaded_pdf(uploaded_file, selected_task, custom_prompt)
+    except requests.RequestException as exc:
+        return (
+            jsonify(
+                {
+                    "error": "Failed to reach llama-server.",
+                    "details": str(exc),
+                    "build_id": BUILD_ID,
+                }
+            ),
+            502,
+        )
+    except Exception as exc:
+        return jsonify({"error": "Could not parse this PDF.", "details": str(exc), "build_id": BUILD_ID}), 400
+
+    payload["build_id"] = BUILD_ID
+    return jsonify(payload)
+
+
 @app.post("/parse")
 def parse_pdf() -> str:
     uploaded_file = request.files.get("pdf")
@@ -437,23 +523,7 @@ def parse_pdf() -> str:
         )
 
     try:
-        task = get_task_config(selected_task, custom_prompt)
-        pdf_bytes = uploaded_file.read()
-        if task["pipeline"] == "patent_claim":
-            page_texts = extract_pdf_pages(pdf_bytes, two_column=True)
-            result, result_meta = extract_patent_claim(page_texts, task)
-            chars_examined = sum(len(page_texts[page - 1]) for page in result_meta["used_pages"])
-        else:
-            page_texts = extract_pdf_pages(pdf_bytes)
-            paper_text = extract_front_text(page_texts, task["max_pages"], task["max_chars"])
-            result = extract_with_llama(paper_text, task["prompt"], task["max_tokens"])
-            result_meta = {
-                "candidate_pages": list(range(1, min(task["max_pages"], len(page_texts)) + 1)),
-                "used_pages": list(range(1, min(task["max_pages"], len(page_texts)) + 1)),
-                "mode": "front_text",
-                "attempts": [],
-            }
-            chars_examined = len(paper_text)
+        payload = parse_uploaded_pdf(uploaded_file, selected_task, custom_prompt)
     except requests.RequestException as exc:
         message = (
             "Failed to reach llama-server. Make sure it is running and the "
@@ -490,11 +560,11 @@ def parse_pdf() -> str:
         tasks=TASK_PROFILES,
         selected_task=selected_task,
         custom_prompt=custom_prompt,
-        result=result,
-        result_label=task["label"],
-        filename=uploaded_file.filename,
-        chars_examined=chars_examined,
-        result_meta=result_meta,
+        result=payload["result"],
+        result_label=payload["task_label"],
+        filename=payload["filename"],
+        chars_examined=payload["chars_examined"],
+        result_meta=payload["result_meta"],
         build_id=BUILD_ID,
     )
 

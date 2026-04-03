@@ -1,6 +1,6 @@
 # PDF Parser Qwen
 
-Rough v1 for extracting the abstract from a scientific PDF with a local Qwen model served through `llama.cpp`.
+Backend for extracting scientific-paper abstracts and patent claim text with a local Qwen model served through `llama.cpp`.
 
 ## What it does
 
@@ -16,6 +16,42 @@ This version assumes:
 - The model is good enough at recovering the target span from noisy extracted text.
 
 ## Quick start
+
+### One-command backend
+
+This repo now includes a backend runner that:
+
+1. Downloads the latest `llama.cpp` macOS arm64 release.
+2. Downloads the configured Qwen GGUF model.
+3. Starts `llama-server`.
+4. Starts the Flask backend.
+
+Run:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python run_backend.py
+```
+
+The JSON backend will be available at `http://127.0.0.1:5001/api/parse`.
+
+Multipart form fields:
+
+- `pdf` required
+- `task` optional: `abstract` or `first_claim`
+- `custom_prompt` optional
+
+Example:
+
+```bash
+curl -X POST http://127.0.0.1:5001/api/parse \
+  -F "task=abstract" \
+  -F "pdf=@/path/to/paper.pdf"
+```
+
+### Manual mode
 
 Create a virtual environment and install dependencies:
 
@@ -92,9 +128,25 @@ The app reads a few environment variables:
 - `PATENT_ALLOW_FULL_DOC_FALLBACK` default: `1`
 - `PATENT_FULL_DOC_MAX_CHARS` default: `120000`
 
+Backend runner configuration:
+
+- `MODEL_REPO` default: `unsloth/Qwen3.5-4B-GGUF`
+- `MODEL_FILE` default: `Qwen3.5-4B-Q4_K_M.gguf`
+- `MODEL_URL` optional full override for model download
+- `LLAMA_RELEASE_API` default: latest `ggml-org/llama.cpp` release API
+- `LLAMA_SERVER_PATH` optional full override to an existing `llama-server` binary
+- `LLAMA_SERVER_HOST` default: `127.0.0.1`
+- `LLAMA_SERVER_PORT` default: `8080`
+- `BACKEND_HOST` default: `127.0.0.1`
+- `BACKEND_PORT` default: `5001`
+- `LLAMA_N_GPU_LAYERS` default: `99`
+- `LLAMA_SERVER_EXTRA_ARGS` optional extra args passed to `llama-server`
+- `HF_TOKEN` optional Hugging Face token if you use a gated/private model
+
 ## Notes
 
 - For this task, text extraction is the intended path. The app does not use PDF page images or multimodal prompts.
 - The request goes to `/v1/chat/completions`, so it should work with `llama-server`'s OpenAI-compatible API.
 - Patent claims can be much longer than abstracts, so the patent task uses higher page, character, and token limits by default.
 - If output quality is uneven, tune the page snippet sizes, patent window sizes, and task prompt before increasing the full-document fallback limit.
+- Runtime downloads are stored under `downloads/`, `vendor/`, and `models/`, which are gitignored.
