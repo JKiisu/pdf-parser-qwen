@@ -65,7 +65,7 @@
                 · used pages={{ result_meta.used_pages|join(', ') }}
               </p>
             {% endif %}
-            <pre>{{ result }}</pre>
+            <pre>{{ display_result or result }}</pre>
           </div>
         {% endif %}
       </section>

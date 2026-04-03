@@ -184,6 +184,7 @@ def parse_uploaded_pdf(
         "task_label": task["label"],
         "filename": uploaded_file.filename,
         "result": result,
+        "display_result": format_display_result(selected_task, result),
         "result_meta": result_meta,
         "chars_examined": chars_examined,
     }
@@ -310,6 +311,64 @@ def clean_patent_claim_text(text: str) -> str:
     cleaned = re.sub(r"(?m)^\s*US\s+\d[\d,\s]*", "", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
+
+
+def is_formulaish_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    lowered = stripped.lower()
+    if lowered.startswith("formula "):
+        return True
+    if len(stripped) <= 18 and len(stripped.split()) <= 4:
+        return True
+    if re.fullmatch(r"[A-Za-z0-9(),./=\-—+\s]+", stripped) and len(stripped) <= 20:
+        return True
+    return False
+
+
+def prettify_patent_display(text: str) -> str:
+    output: list[str] = []
+    paragraph: list[str] = []
+
+    def flush_paragraph() -> None:
+        if paragraph:
+            output.append(" ".join(paragraph))
+            paragraph.clear()
+
+    for raw_line in text.splitlines():
+        line = re.sub(r"\s{2,}", " ", raw_line.strip())
+        if not line:
+            flush_paragraph()
+            if output and output[-1] != "":
+                output.append("")
+            continue
+        if is_formulaish_line(line):
+            flush_paragraph()
+            output.append(line)
+            continue
+        paragraph.append(line)
+
+    flush_paragraph()
+
+    pretty_lines = []
+    previous_blank = False
+    for line in output:
+        if line == "":
+            if not previous_blank:
+                pretty_lines.append(line)
+            previous_blank = True
+            continue
+        pretty_lines.append(line)
+        previous_blank = False
+
+    return "\n".join(pretty_lines).strip()
+
+
+def format_display_result(task_id: str, result: str) -> str:
+    if task_id == "first_claim":
+        return prettify_patent_display(result)
+    return result
 
 
 def has_claim_anchor(text: str) -> bool:
@@ -561,6 +620,7 @@ def parse_pdf() -> str:
         selected_task=selected_task,
         custom_prompt=custom_prompt,
         result=payload["result"],
+        display_result=payload["display_result"],
         result_label=payload["task_label"],
         filename=payload["filename"],
         chars_examined=payload["chars_examined"],
