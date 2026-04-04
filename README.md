@@ -21,7 +21,7 @@ This version assumes:
 
 This repo now includes a backend runner that:
 
-1. Downloads the latest `llama.cpp` macOS arm64 release.
+1. Downloads a matching `llama.cpp` release for the current host platform.
 2. Downloads the configured Qwen GGUF model.
 3. Starts `llama-server`.
 4. Starts the Flask backend.
@@ -33,6 +33,12 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 python run_backend.py
+```
+
+By default, the runner reuses the previously installed `llama.cpp` release. To fetch the latest release explicitly:
+
+```bash
+python run_backend.py --update
 ```
 
 The JSON backend will be available at `http://127.0.0.1:5001/api/parse`.
@@ -113,10 +119,11 @@ The app reads a few environment variables:
 - `LLAMA_BASE_URL` default: `http://127.0.0.1:8080`
 - `LLAMA_MODEL` default: `qwen3.5-4b`
 - `LLAMA_TIMEOUT_SECONDS` default: `120`
+- `LLAMA_ENABLE_THINKING` default: `1`
 - `PDF_MAX_PAGES` default: `4`
 - `PDF_MAX_CHARS` default: `18000`
-- `LLAMA_MAX_TOKENS` default: `1200`
-- `PATENT_MAX_TOKENS` default: `2200`
+- `LLAMA_MAX_TOKENS` default: `4800`
+- `PATENT_MAX_TOKENS` default: `9600`
 - `PAGE_SNIPPET_HEAD_CHARS` default: `1400`
 - `PAGE_SNIPPET_TAIL_CHARS` default: `320`
 - `PATENT_WINDOW_BACK` default: `1`
@@ -142,6 +149,8 @@ Backend runner configuration:
 - `LLAMA_N_GPU_LAYERS` default: `99`
 - `LLAMA_SERVER_EXTRA_ARGS` optional extra args passed to `llama-server`
 - `HF_TOKEN` optional Hugging Face token if you use a gated/private model
+- `python run_backend.py --update` refreshes the pinned `llama.cpp` release
+- By default the app sends `chat_template_kwargs.enable_thinking=true` and keeps `reasoning_content` separately in the backend/API while only using visible answer text as the user-facing result. Set `LLAMA_ENABLE_THINKING=0` if you want to force thinking off.
 
 ## Notes
 

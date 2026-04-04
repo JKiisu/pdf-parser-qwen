@@ -1,5 +1,8 @@
+import json
 import os
 import re
+import sys
+from pathlib import Path
 from typing import Any, Optional
 
 import fitz
@@ -8,11 +11,14 @@ from flask import Flask, jsonify, redirect, render_template, request, url_for
 
 
 LLAMA_BASE_URL = os.getenv("LLAMA_BASE_URL", "http://127.0.0.1:8080")
-LLAMA_MODEL = os.getenv("LLAMA_MODEL", "qwen3.5-4b")
+LLAMA_MODEL = os.getenv("LLAMA_MODEL", "").strip()
 LLAMA_TIMEOUT = int(os.getenv("LLAMA_TIMEOUT_SECONDS", "120"))
-DEFAULT_MAX_PAGES = int(os.getenv("PDF_MAX_PAGES", "4"))
-DEFAULT_MAX_CHARS = int(os.getenv("PDF_MAX_CHARS", "18000"))
-DEFAULT_MAX_TOKENS = int(os.getenv("LLAMA_MAX_TOKENS", "1200"))
+LLAMA_ENABLE_THINKING = os.getenv("LLAMA_ENABLE_THINKING", "1") == "1"
+LLAMA_DEBUG = os.getenv("LLAMA_DEBUG", "0") == "1"
+PAPER_USE_BLOCKS = os.getenv("PAPER_USE_BLOCKS", "0") == "1"
+DEFAULT_MAX_PAGES = int(os.getenv("PDF_MAX_PAGES", "2"))
+DEFAULT_MAX_CHARS = int(os.getenv("PDF_MAX_CHARS", "9000"))
+DEFAULT_MAX_TOKENS = int(os.getenv("LLAMA_MAX_TOKENS", "4800"))
 PAGE_SNIPPET_HEAD_CHARS = int(os.getenv("PAGE_SNIPPET_HEAD_CHARS", "1400"))
 PAGE_SNIPPET_TAIL_CHARS = int(os.getenv("PAGE_SNIPPET_TAIL_CHARS", "320"))
 PATENT_WINDOW_BACK = int(os.getenv("PATENT_WINDOW_BACK", "1"))
@@ -29,12 +35,18 @@ TASK_PROFILES = {
     "abstract": {
         "label": "Paper Abstract",
         "pipeline": "front_text",
-        "prompt": """You are given text extracted from the beginning of a scientific paper.
-Return the paper's actual abstract only.
-The abstract may not be explicitly labeled.
-Do not summarize beyond the abstract.
-Do not add any explanation, heading, quotation marks, or extra text.
-If no abstract is present in the provided text, return exactly: NOT_FOUND""",
+        "prompt": """this is text extracted from a scientific paper. find the paper's abstract. the abstract may or may not be explicitly labeled. output only the abstract text and nothing else.
+
+important:
+- choose the single best contiguous abstract-like block from the text.
+- the abstract is usually one continuous paragraph or a small set of consecutive paragraphs near the beginning.
+- do not start from a partial sentence.
+- do not include title, author list, affiliations, copyright text, keywords, section headings, introduction text, body text, or text from a neighboring column.
+- if some nearby text is clearly unrelated body text, ignore it and return only the coherent abstract block.
+- do not rewrite or summarize; copy the abstract text from the input as faithfully as possible.
+
+if no abstract is present, output exactly: NOT_FOUND""",
+        "message_style": "single_user",
         "max_pages": DEFAULT_MAX_PAGES,
         "max_chars": DEFAULT_MAX_CHARS,
         "max_tokens": DEFAULT_MAX_TOKENS,
@@ -50,11 +62,51 @@ The text may be badly formatted or split across multiple lines.
 Reconstruct claim 1 as faithfully as possible from the provided text.
 Output only claim 1 and nothing else.
 If the first claim is not present in the provided text, return exactly: NOT_FOUND""",
-        "max_tokens": int(os.getenv("PATENT_MAX_TOKENS", "2200")),
+        "max_tokens": int(os.getenv("PATENT_MAX_TOKENS", "9600")),
     },
 }
 
 app = Flask(__name__)
+_RESOLVED_LLAMA_MODEL: Optional[str] = None
+DEBUG_DUMP_DIR = Path(os.getenv("PDF_PARSER_DEBUG_DIR", "/tmp/pdf-parser-debug"))
+
+
+def debug_log(message: str) -> None:
+    if LLAMA_DEBUG:
+        print(f"[pdf-parser] {message}", file=sys.stderr, flush=True)
+
+
+def dump_debug_text(name: str, text: str) -> None:
+    if not LLAMA_DEBUG:
+        return
+    DEBUG_DUMP_DIR.mkdir(parents=True, exist_ok=True)
+    path = DEBUG_DUMP_DIR / name
+    path.write_text(text, encoding="utf-8")
+    debug_log(f"wrote debug text to {path}")
+
+
+def resolve_llama_model() -> str:
+    global _RESOLVED_LLAMA_MODEL
+
+    if LLAMA_MODEL:
+        return LLAMA_MODEL
+    if _RESOLVED_LLAMA_MODEL:
+        return _RESOLVED_LLAMA_MODEL
+
+    response = requests.get(f"{LLAMA_BASE_URL}/v1/models", timeout=10)
+    response.raise_for_status()
+    data = response.json()
+    models = data.get("data") or []
+    if not models:
+        raise ValueError("llama-server did not report any models from /v1/models.")
+
+    model_id = str(models[0].get("id", "")).strip()
+    if not model_id:
+        raise ValueError("llama-server returned a model entry without an id.")
+
+    _RESOLVED_LLAMA_MODEL = model_id
+    debug_log(f"Auto-detected llama model: {_RESOLVED_LLAMA_MODEL}")
+    return _RESOLVED_LLAMA_MODEL
 
 
 def normalize_text(text: str) -> str:
@@ -64,8 +116,32 @@ def normalize_text(text: str) -> str:
     return text.strip()
 
 
-def extract_page_text(page: fitz.Page, two_column: bool = False) -> str:
+def extract_text_blocks(page: fitz.Page) -> str:
+    blocks = page.get_text("blocks")
+    text_blocks: list[tuple[float, float, str]] = []
+
+    for block in blocks:
+        if len(block) < 5:
+            continue
+        x0, y0, _x1, _y1, text = block[:5]
+        block_type = block[6] if len(block) > 6 else 0
+        if block_type != 0:
+            continue
+        if not isinstance(text, str):
+            continue
+        cleaned = normalize_text(text)
+        if not cleaned:
+            continue
+        text_blocks.append((float(y0), float(x0), cleaned))
+
+    text_blocks.sort(key=lambda item: (round(item[0], 1), round(item[1], 1)))
+    return normalize_text("\n\n".join(text for _y0, _x0, text in text_blocks))
+
+
+def extract_page_text(page: fitz.Page, two_column: bool = False, use_blocks: bool = False) -> str:
     if not two_column:
+        if use_blocks:
+            return extract_text_blocks(page)
         return normalize_text(page.get_text("text", sort=True))
 
     rect = page.rect
@@ -77,11 +153,15 @@ def extract_page_text(page: fitz.Page, two_column: bool = False) -> str:
     return normalize_text("\n".join(part for part in (left_text, right_text) if part))
 
 
-def extract_pdf_pages(pdf_bytes: bytes, two_column: bool = False) -> list[str]:
+def extract_pdf_pages(
+    pdf_bytes: bytes,
+    two_column: bool = False,
+    use_blocks: bool = False,
+) -> list[str]:
     with fitz.open(stream=pdf_bytes, filetype="pdf") as document:
         pages = []
         for page in document:
-            page_text = extract_page_text(page, two_column=two_column)
+            page_text = extract_page_text(page, two_column=two_column, use_blocks=use_blocks)
             pages.append(page_text)
 
     if not pages:
@@ -96,11 +176,36 @@ def truncate_text(text: str, max_chars: int) -> str:
     return text
 
 
+def trim_abstract_region(text: str) -> str:
+    heading_patterns = [
+        r"(?im)^\s*(?:\d+[\.\)]\s*)?introduction\s*$",
+        r"(?im)^\s*(?:\d+[\.\)]\s*)?background\s*$",
+        r"(?im)^\s*(?:\d+[\.\)]\s*)?(?:materials?\s+and\s+methods?|methods?)\s*$",
+        r"(?im)^\s*(?:\d+[\.\)]\s*)?results?\s*$",
+        r"(?im)^\s*(?:\d+[\.\)]\s*)?discussion\s*$",
+        r"(?im)^\s*(?:\d+[\.\)]\s*)?conclusions?\s*$",
+    ]
+
+    cut_index: Optional[int] = None
+    for pattern in heading_patterns:
+        match = re.search(pattern, text)
+        if match is None:
+            continue
+        if cut_index is None or match.start() < cut_index:
+            cut_index = match.start()
+
+    if cut_index is not None and cut_index > 0:
+        return text[:cut_index].strip()
+    return text
+
+
 def extract_front_text(page_texts: list[str], max_pages: int, max_chars: int) -> str:
     visible_pages = [text for text in page_texts[:max_pages] if text]
     if not visible_pages:
         raise ValueError("No text could be extracted from the selected PDF pages.")
-    return truncate_text(normalize_text("\n\n".join(visible_pages)), max_chars)
+    front_text = normalize_text("\n\n".join(visible_pages))
+    front_text = trim_abstract_region(front_text)
+    return truncate_text(front_text, max_chars)
 
 
 def get_task_config(task_name: str, custom_prompt: str) -> dict[str, Any]:
@@ -110,49 +215,186 @@ def get_task_config(task_name: str, custom_prompt: str) -> dict[str, Any]:
     return task
 
 
-def extract_with_llama(paper_text: str, system_prompt: str, max_tokens: int) -> str:
-    payload: dict[str, Any] = {
-        "model": LLAMA_MODEL,
-        "temperature": 0,
-        "max_tokens": max_tokens,
-        "messages": [
+def collect_text_fragments(value: Any, skip_reasoning: bool) -> list[str]:
+    items: list[Any]
+    if isinstance(value, list):
+        items = value
+    else:
+        items = [value]
+
+    text_parts: list[str] = []
+    for item in items:
+        if isinstance(item, str):
+            text_parts.append(item)
+            continue
+        if not isinstance(item, dict):
+            continue
+
+        item_type = str(item.get("type", "")).lower()
+        if skip_reasoning and item_type in {"reasoning", "reasoning_content"}:
+            continue
+        if not skip_reasoning and item_type not in {"reasoning", "reasoning_content"}:
+            continue
+
+        for key in ("text", "content", "value"):
+            inner_value = item.get(key)
+            if isinstance(inner_value, str):
+                text_parts.append(inner_value)
+                break
+    return text_parts
+
+
+def extract_choice_text(choice: dict[str, Any]) -> tuple[str, str]:
+    payload = choice.get("delta") or choice.get("message") or {}
+    content = payload.get("content", "")
+    reasoning_content = payload.get("reasoning_content", "")
+
+    visible_content = "".join(collect_text_fragments(content, skip_reasoning=True))
+    embedded_reasoning = "".join(collect_text_fragments(content, skip_reasoning=False))
+    reasoning_text = ""
+
+    if isinstance(reasoning_content, (list, dict, str)):
+        reasoning_text = "".join(collect_text_fragments(reasoning_content, skip_reasoning=False))
+    if not reasoning_text:
+        reasoning_text = embedded_reasoning
+    if not visible_content and isinstance(choice.get("text"), str):
+        visible_content = choice["text"]
+
+    return visible_content, reasoning_text
+
+
+def extract_with_llama(
+    paper_text: str,
+    system_prompt: str,
+    max_tokens: int,
+    enable_thinking: Optional[bool] = None,
+    user_only: bool = False,
+) -> tuple[str, str]:
+    if enable_thinking is None:
+        enable_thinking = LLAMA_ENABLE_THINKING
+
+    messages: list[dict[str, str]]
+    if user_only:
+        messages = [{"role": "user", "content": paper_text}]
+    else:
+        messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": paper_text},
-        ],
+        ]
+
+    model_name = resolve_llama_model()
+    payload: dict[str, Any] = {
+        "model": model_name,
+        "temperature": 0,
+        "max_tokens": max_tokens,
+        "stream": True,
+        "messages": messages,
     }
+    payload["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
 
     response = requests.post(
         f"{LLAMA_BASE_URL}/v1/chat/completions",
         json=payload,
+        headers={"Accept": "text/event-stream"},
         timeout=LLAMA_TIMEOUT,
+        stream=True,
     )
     response.raise_for_status()
 
-    data = response.json()
-    choices = data.get("choices") or []
-    if not choices:
-        raise ValueError("Model response did not include any choices.")
+    content_type = response.headers.get("Content-Type", "")
+    debug_log(
+        f"chat request model={model_name} stream=True thinking={enable_thinking} user_only={user_only} "
+        f"content_type={content_type!r} prompt_chars={len(system_prompt)} text_chars={len(paper_text)} "
+        f"max_tokens={max_tokens}"
+    )
+    finish_reason = "unknown"
+    content_types: list[str] = []
+    message_keys: list[str] = []
+    has_reasoning = False
 
-    choice = choices[0]
-    message = choice.get("message") or {}
-    content = message.get("content", "")
+    if content_type.startswith("text/event-stream"):
+        visible_parts: list[str] = []
+        reasoning_parts: list[str] = []
 
-    if isinstance(content, list):
-        text_parts = []
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                text_parts.append(item.get("text", ""))
-        content = "\n".join(part for part in text_parts if part)
+        for raw_line in response.iter_lines(decode_unicode=True):
+            if not raw_line:
+                continue
+            if not raw_line.startswith("data:"):
+                continue
+            data_line = raw_line[5:].strip()
+            if data_line == "[DONE]":
+                break
+            try:
+                event = json.loads(data_line)
+            except json.JSONDecodeError:
+                continue
 
-    if not content and isinstance(choice.get("text"), str):
-        content = choice["text"]
+            choices = event.get("choices") or []
+            if not choices:
+                continue
 
-    result = content.strip().strip("`").strip()
-    if not result:
+            choice = choices[0]
+            delta = choice.get("delta") or choice.get("message") or {}
+            if isinstance(delta, dict):
+                message_keys = sorted(set(message_keys) | set(delta.keys()))
+                if isinstance(delta.get("content"), list):
+                    for item in delta["content"]:
+                        if isinstance(item, dict) and item.get("type") is not None:
+                            content_types.append(str(item.get("type")))
+                has_reasoning = has_reasoning or bool(delta.get("reasoning_content"))
+
+            visible_text, reasoning_text = extract_choice_text(choice)
+            if visible_text:
+                visible_parts.append(visible_text)
+            if reasoning_text:
+                reasoning_parts.append(reasoning_text)
+
+            if choice.get("finish_reason") is not None:
+                finish_reason = choice.get("finish_reason", finish_reason)
+
+        result = "".join(visible_parts).strip().strip("`").strip()
+        reasoning_text = "".join(reasoning_parts).strip()
+        debug_log(
+            f"sse parse complete visible_chars={len(result)} reasoning_chars={len(reasoning_text)} "
+            f"finish_reason={finish_reason} message_keys={message_keys} content_types={content_types}"
+        )
+    else:
+        data = response.json()
+        choices = data.get("choices") or []
+        if not choices:
+            raise ValueError("Model response did not include any choices.")
+
+        choice = choices[0]
+        message = choice.get("message") or {}
+        if isinstance(message, dict):
+            message_keys = sorted(message.keys())
+            if isinstance(message.get("content"), list):
+                for item in message["content"]:
+                    if isinstance(item, dict) and item.get("type") is not None:
+                        content_types.append(str(item.get("type")))
+            has_reasoning = bool(message.get("reasoning_content")) or "reasoning_content" in content_types
+
+        visible_text, reasoning_text = extract_choice_text(choice)
+        result = visible_text.strip().strip("`").strip()
+        reasoning_text = reasoning_text.strip()
         finish_reason = choice.get("finish_reason", "unknown")
-        raise ValueError(f"Model returned an empty response. finish_reason={finish_reason}")
+        debug_log(
+            f"json parse complete visible_chars={len(result)} reasoning_chars={len(reasoning_text)} "
+            f"finish_reason={finish_reason} message_keys={message_keys} content_types={content_types}"
+        )
 
-    return result
+    if not result:
+        raise ValueError(
+            "Model returned an empty response. "
+            f"model={model_name}; "
+            f"finish_reason={finish_reason}; "
+            f"message_keys={message_keys}; "
+            f"content_types={content_types}; "
+            f"has_reasoning_content={has_reasoning}; "
+            f"LLAMA_ENABLE_THINKING={enable_thinking}"
+        )
+
+    return result, reasoning_text
 
 
 def parse_uploaded_pdf(
@@ -163,14 +405,28 @@ def parse_uploaded_pdf(
 
     task = get_task_config(selected_task, custom_prompt)
     pdf_bytes = uploaded_file.read()
+    reasoning_trace = ""
     if task["pipeline"] == "patent_claim":
         page_texts = extract_pdf_pages(pdf_bytes, two_column=True)
         result, result_meta = extract_patent_claim(page_texts, task)
         chars_examined = sum(len(page_texts[page - 1]) for page in result_meta["used_pages"])
     else:
-        page_texts = extract_pdf_pages(pdf_bytes)
+        page_texts = extract_pdf_pages(pdf_bytes, use_blocks=PAPER_USE_BLOCKS)
         paper_text = extract_front_text(page_texts, task["max_pages"], task["max_chars"])
-        result = extract_with_llama(paper_text, task["prompt"], task["max_tokens"])
+        dump_debug_text("paper_front_text.txt", paper_text)
+        if task.get("message_style") == "single_user":
+            user_message = f"{task['prompt']}\n\n{paper_text}"
+            dump_debug_text("paper_user_message.txt", user_message)
+            result, reasoning_trace = extract_with_llama(
+                user_message,
+                "",
+                task["max_tokens"],
+                user_only=True,
+            )
+        else:
+            dump_debug_text("paper_system_prompt.txt", task["prompt"])
+            dump_debug_text("paper_user_message.txt", paper_text)
+            result, reasoning_trace = extract_with_llama(paper_text, task["prompt"], task["max_tokens"])
         result_meta = {
             "candidate_pages": list(range(1, min(task["max_pages"], len(page_texts)) + 1)),
             "used_pages": list(range(1, min(task["max_pages"], len(page_texts)) + 1)),
@@ -185,6 +441,7 @@ def parse_uploaded_pdf(
         "filename": uploaded_file.filename,
         "result": result,
         "display_result": format_display_result(selected_task, result),
+        "reasoning_trace": reasoning_trace,
         "result_meta": result_meta,
         "chars_examined": chars_examined,
     }
@@ -261,7 +518,12 @@ Prefer pages near the claims section, not early pages that only mention patent c
 Return only a comma-separated list of up to 5 page numbers, ordered from best to worst.
 Do not add any explanation or extra words."""
     ranking_input = build_page_summary_prompt(page_texts)
-    raw_ranking = extract_with_llama(ranking_input, ranking_prompt, max_tokens=80)
+    raw_ranking, _ = extract_with_llama(
+        ranking_input,
+        ranking_prompt,
+        max_tokens=80,
+        enable_thinking=False,
+    )
     ranked_pages = parse_page_numbers(raw_ranking, len(page_texts))
     heuristic_pages = heuristic_claim_candidates(page_texts)
 
@@ -460,7 +722,12 @@ def try_claim_window(
             return direct_claim, attempts
 
         result = strip_after_claim_two(
-            extract_with_llama(window_text, task["prompt"], task["max_tokens"])
+            extract_with_llama(
+                window_text,
+                task["prompt"],
+                task["max_tokens"],
+                enable_thinking=False,
+            )[0]
         )
         attempts.append(window_pages)
         if is_claim_result_strong(result, raw_window_text):
@@ -503,7 +770,12 @@ def extract_patent_claim(page_texts: list[str], task: dict[str, Any]) -> tuple[s
         full_text = normalize_text(format_page_window(page_texts, list(range(1, len(page_texts) + 1))))
         if len(full_text) <= PATENT_FULL_DOC_MAX_CHARS:
             result = strip_after_claim_two(
-                extract_with_llama(full_text, task["prompt"], task["max_tokens"])
+                extract_with_llama(
+                    full_text,
+                    task["prompt"],
+                    task["max_tokens"],
+                    enable_thinking=False,
+                )[0]
             )
             return result, {
                 "candidate_pages": ordered_candidates[:PATENT_MAX_CANDIDATES],

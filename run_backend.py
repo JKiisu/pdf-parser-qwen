@@ -1,4 +1,5 @@
 import atexit
+import argparse
 import os
 import platform
 import shlex
@@ -20,6 +21,7 @@ DOWNLOADS_DIR = ROOT / "downloads"
 MODELS_DIR = ROOT / "models"
 VENDOR_DIR = ROOT / "vendor"
 LLAMA_VENDOR_DIR = VENDOR_DIR / "llama.cpp"
+CURRENT_RELEASE_FILE = LLAMA_VENDOR_DIR / "CURRENT_RELEASE"
 
 LLAMA_SERVER_HOST = os.getenv("LLAMA_SERVER_HOST", "127.0.0.1")
 LLAMA_SERVER_PORT = int(os.getenv("LLAMA_SERVER_PORT", "8080"))
@@ -134,14 +136,43 @@ def find_llama_server(search_root: Path) -> Path:
     raise RuntimeError("llama-server was not found in the extracted llama.cpp bundle.")
 
 
-def ensure_llama_server() -> Path:
+def load_cached_release_tag() -> str | None:
+    if not CURRENT_RELEASE_FILE.exists():
+        return None
+    tag = CURRENT_RELEASE_FILE.read_text().strip()
+    return tag or None
+
+
+def store_cached_release_tag(tag_name: str) -> None:
+    CURRENT_RELEASE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CURRENT_RELEASE_FILE.write_text(tag_name + "\n")
+
+
+def fetch_latest_release() -> dict:
+    response = requests.get(LLAMA_RELEASE_API, timeout=HTTP_TIMEOUT)
+    response.raise_for_status()
+    return response.json()
+
+
+def ensure_llama_server(update: bool = False) -> Path:
     if LLAMA_SERVER_PATH:
         path = Path(LLAMA_SERVER_PATH).expanduser().resolve()
         if not path.exists():
             raise RuntimeError(f"Configured LLAMA_SERVER_PATH does not exist: {path}")
         return path
 
-    release = requests.get(LLAMA_RELEASE_API, timeout=HTTP_TIMEOUT).json()
+    cached_tag = load_cached_release_tag()
+    if cached_tag and not update:
+        extract_dir = LLAMA_VENDOR_DIR / cached_tag
+        if extract_dir.exists():
+            server_path = find_llama_server(extract_dir)
+            print(
+                f"Using cached llama.cpp release {cached_tag} at {server_path} "
+                f"for system={HOST_SYSTEM} arch={HOST_MACHINE}"
+            )
+            return server_path
+
+    release = fetch_latest_release()
     asset = select_release_asset(release.get("assets", []))
     archive_name = asset["name"]
     archive_path = DOWNLOADS_DIR / archive_name
@@ -156,6 +187,7 @@ def ensure_llama_server() -> Path:
         extract_archive(archive_path, extract_dir)
 
     server_path = find_llama_server(extract_dir)
+    store_cached_release_tag(release["tag_name"])
     print(f"Using llama-server at {server_path} for system={HOST_SYSTEM} arch={HOST_MACHINE}")
     return server_path
 
@@ -230,9 +262,20 @@ def install_cleanup(process: subprocess.Popen) -> None:
     signal.signal(signal.SIGTERM, handle_signal)
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run the local PDF parser backend.")
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        help="Check for and install the latest llama.cpp release before starting.",
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
+    args = parse_args()
     ensure_dirs()
-    server_path = ensure_llama_server()
+    server_path = ensure_llama_server(update=args.update)
     model_path = ensure_model()
 
     base_url = f"http://{LLAMA_SERVER_HOST}:{LLAMA_SERVER_PORT}"
