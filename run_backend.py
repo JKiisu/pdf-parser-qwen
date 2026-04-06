@@ -27,8 +27,8 @@ LLAMA_SERVER_HOST = os.getenv("LLAMA_SERVER_HOST", "127.0.0.1")
 LLAMA_SERVER_PORT = int(os.getenv("LLAMA_SERVER_PORT", "8080"))
 BACKEND_HOST = os.getenv("BACKEND_HOST", "127.0.0.1")
 BACKEND_PORT = int(os.getenv("BACKEND_PORT", "5001"))
-MODEL_REPO = os.getenv("MODEL_REPO", "unsloth/Qwen3.5-4B-GGUF")
-MODEL_FILE = os.getenv("MODEL_FILE", "Qwen3.5-4B-Q4_K_M.gguf")
+MODEL_REPO = os.getenv("MODEL_REPO", "unsloth/gemma-4-E2B-it-GGUF")
+MODEL_FILE = os.getenv("MODEL_FILE", "gemma-4-E2B-it-UD-Q4_K_XL.gguf")
 MODEL_URL = os.getenv(
     "MODEL_URL",
     f"https://huggingface.co/{MODEL_REPO}/resolve/main/{MODEL_FILE}?download=true",

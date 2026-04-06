@@ -13,7 +13,8 @@ from flask import Flask, jsonify, redirect, render_template, request, url_for
 LLAMA_BASE_URL = os.getenv("LLAMA_BASE_URL", "http://127.0.0.1:8080")
 LLAMA_MODEL = os.getenv("LLAMA_MODEL", "").strip()
 LLAMA_TIMEOUT = int(os.getenv("LLAMA_TIMEOUT_SECONDS", "120"))
-LLAMA_ENABLE_THINKING = os.getenv("LLAMA_ENABLE_THINKING", "0") == "1"
+LLAMA_TEMPERATURE = float(os.getenv("LLAMA_TEMPERATURE", "0.2"))
+LLAMA_ENABLE_THINKING = os.getenv("LLAMA_ENABLE_THINKING", "1") == "1"
 LLAMA_DEBUG = os.getenv("LLAMA_DEBUG", "0") == "1"
 PAPER_USE_BLOCKS = os.getenv("PAPER_USE_BLOCKS", "1") == "1"
 BACKEND_HOST = os.getenv("BACKEND_HOST", "127.0.0.1")
@@ -301,7 +302,7 @@ def extract_with_llama(
     model_name = resolve_llama_model()
     payload: dict[str, Any] = {
         "model": model_name,
-        "temperature": 0,
+        "temperature": LLAMA_TEMPERATURE,
         "max_tokens": max_tokens,
         "stream": True,
         "messages": messages,
@@ -320,7 +321,7 @@ def extract_with_llama(
     content_type = response.headers.get("Content-Type", "")
     debug_log(
         f"chat request model={model_name} stream=True thinking={enable_thinking} user_only={user_only} "
-        f"content_type={content_type!r} prompt_chars={len(system_prompt)} text_chars={len(paper_text)} "
+        f"temperature={LLAMA_TEMPERATURE} content_type={content_type!r} prompt_chars={len(system_prompt)} text_chars={len(paper_text)} "
         f"max_tokens={max_tokens}"
     )
     finish_reason = "unknown"

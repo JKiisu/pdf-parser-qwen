@@ -1,6 +1,6 @@
 # PDF Parser Qwen
 
-Backend for extracting scientific-paper abstracts and patent claim text with a local Qwen model served through `llama.cpp`.
+Backend for extracting scientific-paper abstracts and patent claim text with a local open model served through `llama.cpp`.
 
 ## What it does
 
@@ -22,7 +22,7 @@ This version assumes:
 This repo now includes a backend runner that:
 
 1. Downloads a matching `llama.cpp` release for the current host platform.
-2. Downloads the configured Qwen GGUF model.
+2. Downloads the configured GGUF model.
 3. Starts `llama-server`.
 4. Starts the Flask backend.
 
@@ -71,7 +71,7 @@ Start `llama-server` in a separate shell. Example:
 
 ```bash
 llama-server \
-  -m /path/to/Qwen3.5-4B-Q4_K_M.gguf \
+  -m /path/to/gemma-4-E2B-it-UD-Q4_K_XL.gguf \
   --host 127.0.0.1 \
   --port 8080
 ```
@@ -127,7 +127,8 @@ The app reads a few environment variables:
 - `LLAMA_BASE_URL` default: `http://127.0.0.1:8080`
 - `LLAMA_MODEL` default: unset; auto-detected from `/v1/models`
 - `LLAMA_TIMEOUT_SECONDS` default: `120`
-- `LLAMA_ENABLE_THINKING` default: `0`
+- `LLAMA_TEMPERATURE` default: `0.2`
+- `LLAMA_ENABLE_THINKING` default: `1`
 - `PDF_MAX_PAGES` default: `2`
 - `PDF_MAX_CHARS` default: `9000`
 - `LLAMA_MAX_TOKENS` default: `4800`
@@ -148,8 +149,8 @@ The app reads a few environment variables:
 
 Backend runner configuration:
 
-- `MODEL_REPO` default: `unsloth/Qwen3.5-4B-GGUF`
-- `MODEL_FILE` default: `Qwen3.5-4B-Q4_K_M.gguf`
+- `MODEL_REPO` default: `unsloth/gemma-4-E2B-it-GGUF`
+- `MODEL_FILE` default: `gemma-4-E2B-it-UD-Q4_K_XL.gguf`
 - `MODEL_URL` optional full override for model download
 - `LLAMA_RELEASE_API` default: latest `ggml-org/llama.cpp` release API
 - `LLAMA_SERVER_PATH` optional full override to an existing `llama-server` binary
@@ -161,7 +162,7 @@ Backend runner configuration:
 - `LLAMA_SERVER_EXTRA_ARGS` optional extra args passed to `llama-server`
 - `HF_TOKEN` optional Hugging Face token if you use a gated/private model
 - `python run_backend.py --update` refreshes the pinned `llama.cpp` release
-- By default the app sends `chat_template_kwargs.enable_thinking=false`. Set `LLAMA_ENABLE_THINKING=1` if you want to force thinking on.
+- By default the app sends `chat_template_kwargs.enable_thinking=true`. Set `LLAMA_ENABLE_THINKING=0` if you want to force thinking off.
 
 ## Notes
 
