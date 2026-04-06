@@ -76,11 +76,19 @@ llama-server \
   --port 8080
 ```
 
-If your `llama-server` requires a different model name in the OpenAI-compatible request, set:
+Then start the Flask app:
 
 ```bash
-export LLAMA_MODEL=qwen3.5-4b
+python app.py
 ```
+
+If your `llama-server` is running on another machine:
+
+```bash
+LLAMA_BASE_URL="http://192.168.1.51:8080" python app.py
+```
+
+The app now auto-detects the loaded model from `/v1/models`, so you usually do not need to set `LLAMA_MODEL` manually.
 
 Run the app:
 
@@ -117,13 +125,16 @@ It now:
 The app reads a few environment variables:
 
 - `LLAMA_BASE_URL` default: `http://127.0.0.1:8080`
-- `LLAMA_MODEL` default: `qwen3.5-4b`
+- `LLAMA_MODEL` default: unset; auto-detected from `/v1/models`
 - `LLAMA_TIMEOUT_SECONDS` default: `120`
-- `LLAMA_ENABLE_THINKING` default: `1`
-- `PDF_MAX_PAGES` default: `4`
-- `PDF_MAX_CHARS` default: `18000`
+- `LLAMA_ENABLE_THINKING` default: `0`
+- `PDF_MAX_PAGES` default: `2`
+- `PDF_MAX_CHARS` default: `9000`
 - `LLAMA_MAX_TOKENS` default: `4800`
 - `PATENT_MAX_TOKENS` default: `9600`
+- `PAPER_USE_BLOCKS` default: `1`
+- `BACKEND_HOST` default: `127.0.0.1`
+- `BACKEND_PORT` default: `5001`
 - `PAGE_SNIPPET_HEAD_CHARS` default: `1400`
 - `PAGE_SNIPPET_TAIL_CHARS` default: `320`
 - `PATENT_WINDOW_BACK` default: `1`
@@ -150,7 +161,7 @@ Backend runner configuration:
 - `LLAMA_SERVER_EXTRA_ARGS` optional extra args passed to `llama-server`
 - `HF_TOKEN` optional Hugging Face token if you use a gated/private model
 - `python run_backend.py --update` refreshes the pinned `llama.cpp` release
-- By default the app sends `chat_template_kwargs.enable_thinking=true` and keeps `reasoning_content` separately in the backend/API while only using visible answer text as the user-facing result. Set `LLAMA_ENABLE_THINKING=0` if you want to force thinking off.
+- By default the app sends `chat_template_kwargs.enable_thinking=false`. Set `LLAMA_ENABLE_THINKING=1` if you want to force thinking on.
 
 ## Notes
 

@@ -280,7 +280,6 @@ def main() -> int:
 
     base_url = f"http://{LLAMA_SERVER_HOST}:{LLAMA_SERVER_PORT}"
     os.environ["LLAMA_BASE_URL"] = base_url
-    os.environ.setdefault("LLAMA_MODEL", "qwen3.5-4b")
 
     llama_process = start_llama_server(server_path, model_path)
     install_cleanup(llama_process)

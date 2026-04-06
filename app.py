@@ -13,9 +13,11 @@ from flask import Flask, jsonify, redirect, render_template, request, url_for
 LLAMA_BASE_URL = os.getenv("LLAMA_BASE_URL", "http://127.0.0.1:8080")
 LLAMA_MODEL = os.getenv("LLAMA_MODEL", "").strip()
 LLAMA_TIMEOUT = int(os.getenv("LLAMA_TIMEOUT_SECONDS", "120"))
-LLAMA_ENABLE_THINKING = os.getenv("LLAMA_ENABLE_THINKING", "1") == "1"
+LLAMA_ENABLE_THINKING = os.getenv("LLAMA_ENABLE_THINKING", "0") == "1"
 LLAMA_DEBUG = os.getenv("LLAMA_DEBUG", "0") == "1"
-PAPER_USE_BLOCKS = os.getenv("PAPER_USE_BLOCKS", "0") == "1"
+PAPER_USE_BLOCKS = os.getenv("PAPER_USE_BLOCKS", "1") == "1"
+BACKEND_HOST = os.getenv("BACKEND_HOST", "127.0.0.1")
+BACKEND_PORT = int(os.getenv("BACKEND_PORT", "5001"))
 DEFAULT_MAX_PAGES = int(os.getenv("PDF_MAX_PAGES", "2"))
 DEFAULT_MAX_CHARS = int(os.getenv("PDF_MAX_CHARS", "9000"))
 DEFAULT_MAX_TOKENS = int(os.getenv("LLAMA_MAX_TOKENS", "4800"))
@@ -118,12 +120,15 @@ def normalize_text(text: str) -> str:
 
 def extract_text_blocks(page: fitz.Page) -> str:
     blocks = page.get_text("blocks")
-    text_blocks: list[tuple[float, float, str]] = []
+    rect = page.rect
+    page_width = float(rect.width)
+    mid_x = float(rect.x0 + (rect.width / 2))
+    text_blocks: list[tuple[int, float, float, str]] = []
 
     for block in blocks:
         if len(block) < 5:
             continue
-        x0, y0, _x1, _y1, text = block[:5]
+        x0, y0, x1, _y1, text = block[:5]
         block_type = block[6] if len(block) > 6 else 0
         if block_type != 0:
             continue
@@ -132,10 +137,21 @@ def extract_text_blocks(page: fitz.Page) -> str:
         cleaned = normalize_text(text)
         if not cleaned:
             continue
-        text_blocks.append((float(y0), float(x0), cleaned))
+        x0f = float(x0)
+        x1f = float(x1)
+        block_width = max(0.0, x1f - x0f)
 
-    text_blocks.sort(key=lambda item: (round(item[0], 1), round(item[1], 1)))
-    return normalize_text("\n\n".join(text for _y0, _x0, text in text_blocks))
+        if x0f <= page_width * 0.18 and block_width >= page_width * 0.42:
+            column_order = 0
+        elif x0f < mid_x:
+            column_order = 1
+        else:
+            column_order = 2
+
+        text_blocks.append((column_order, float(y0), x0f, cleaned))
+
+    text_blocks.sort(key=lambda item: (item[0], round(item[1], 1), round(item[2], 1)))
+    return normalize_text("\n\n".join(text for _col, _y0, _x0, text in text_blocks))
 
 
 def extract_page_text(page: fitz.Page, two_column: bool = False, use_blocks: bool = False) -> str:
@@ -902,4 +918,4 @@ def parse_pdf() -> str:
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host=BACKEND_HOST, port=BACKEND_PORT, debug=False)
